@@ -1,0 +1,253 @@
+import numpy as np
+from scipy.special import digamma,polygamma,gamma
+
+from math import exp,log
+
+def find_theta(gamma,D,K):
+    theta=np.empty((D,K),dtype=float)
+    for d in range(D):
+        denominator=np.sum(gamma[d])
+        theta[d]=gamma[d]/denominator
+    return theta
+
+def find_word(document,n):
+    word=1
+    while sum(document[0:word])<n:
+        word=word+1
+    return word-1
+class gp:
+    """
+    According to the paper, it uses varaitional inference instead of sampling.
+    
+    Find the value of gamma and eta given alpha and beta that minimize the KL divergence
+    between the variational distribution and the true posterier distribution for a document.
+    Use gamma to find theta.
+    
+    alpha is a 1*K vector
+    beta is a K*V matrix
+    alpha and beta are known here
+    gamma is a 1*K vector
+    theta is a 1*k vector following the Dirichlet distribution parametrized by gamma 
+    phi is a N*k matrix 
+    z[n] is a 1*k vector following the multinomial distribution parametrized by phi
+    
+    """
+    def __init__(self,alpha,beta,document,K,N):
+        self.alpha=alpha
+        self.beta=beta
+        self.document=document
+        self.K=K
+        self.N=N
+        self.V=document.shape[0]
+    def _init(self):
+        phi=np.empty((self.N,self.K),dtype=float)
+        gamma=np.empty(self.K,dtype=float)
+        for i in range(self.N):
+            for j in range(self.K):
+                phi[i][j]=1/self.K
+        self.phi=phi
+        for i in range(self.K):
+            gamma[i]=self.alpha[i]+self.N/self.K
+        self.gamma=gamma
+    def get_lowerbound(self):
+        gammasum=np.sum(self.gamma)
+        gamma_array=[x-digamma(gammasum) for x in digamma(self.gamma)]
+        l=0
+        l+=log(gamma(np.sum(self.alpha)))
+        l+=-np.sum(np.log(gamma(self.alpha)))
+        l+=np.sum(np.multiply([x-1 for x in self.alpha],gamma_array))
+        
+        for n in range(self.N):
+            l+=np.sum(np.multiply(self.phi[n],gamma_array))
+        
+        for n in range(self.N):
+            for i in range(self.K):
+                for j in range(self.V):
+                    if find_word(self.document,n)!=j:
+                        continue
+                    else:
+                        l+=self.phi[n][i]*log(self.beta[i][j])
+        l-=log(gamma(gammasum))
+        l+=np.sum(np.log(gamma(self.gamma)))
+        l-=np.sum(np.multiply([x-1 for x in self.gamma],gamma_array))
+        l-=np.sum(np.multiply(self.phi,np.log(self.phi)))
+        return l
+    def find_gp(self,max_iter=50,tol=0.01):
+        self._init()
+        gamma_history=[self.gamma]
+        phi_history=[self.phi]
+        lowerbound_history=[self.get_lowerbound()]
+        for iteration in range(max_iter):
+            self.phi_gamma()
+            phi_history.append(self.phi)
+            gamma_history.append(self.gamma)
+            lowerbound_history.append(self.get_lowerbound())
+            #if iteration%5==0:
+                #print(iteration,self.phi)
+            if np.abs(lowerbound_history[-2]-lowerbound_history[-1])<=tol:
+                #print('gp converged with ll %.3f at iteration %d'%(self.lowerbound_history[-1],
+                #                                                     iteration))
+                break
+    def phi_gamma(self):
+        self.find_phi()
+        self.find_gamma()  
+    def find_phi(self):
+        for n in range(self.N):
+            v=find_word(self.document,n)
+            for k in range(self.K):
+                self.phi[n][k]=self.beta[k][v]*exp(digamma(self.gamma[k]))
+            norm = np.linalg.norm(self.phi[n])
+            self.phi[n]/=norm
+    def find_gamma(self):      
+        self.gamma=self.alpha
+        for n in range(self.N):
+            self.gamma=np.add(self.gamma,self.phi[n])
+     
+class lda():
+    '''
+    Find alpha and beta using gp defined above
+    '''
+    def __init__(self,topic_number,iteration1,iteration2):
+        self.topic_number=topic_number
+        self.iteration1=iteration1
+        self.iteration2=iteration2
+    def _init(self,Corpus):
+        X=np.matrix(Corpus)
+        D,V=X.shape
+        self.dataset=Corpus
+        self.D=D
+        self.V=V
+        self.N=np.empty(D,dtype=int)
+        for d in range(D):
+            self.N[d]=np.sum(X[d])
+        self.phi=[]
+        self.gamma=np.empty((self.D,self.topic_number),dtype=float)
+        self.alpha=np.empty(self.topic_number,dtype=float)
+        np.random.seed(0)
+        self.alpha=np.random.uniform(0.1,2.0,self.topic_number)
+        self.random.seed(1)
+        self.beta=np.random.rand(self.topic_number,V)
+        for i in range(self.topic_number):
+            norm = np.linalg.norm(self.beta[i])
+            self.beta[i]/=norm
+    def refresh_gp(self):
+        for d in range(self.D):
+            document=self.dataset[d]
+            dgp=gp(self.alpha,self.beta,document,self.topic_number,self.N[d])
+            dgp.find_gp()
+            self.phi.append(dgp.phi)
+            self.gamma[d]=dgp.gamma
+    def find_alpha(self):
+        for iterations in range(self.iteration1):
+            gradient=np.empty(self.topic_number,dtype=float)
+            for i in range(self.topic_number):
+                gradient[i]=self.D*(digamma(np.sum(self.alpha))-digamma(self.alpha[i]))
+                for d in range(self.D):
+                    gradient[i]+=digamma(self.gamma[d][i])-digamma(np.sum(self.gamma[d]))
+            h=np.empty(self.topic_number,dtype=float)
+            denominator=0
+            numerator=0
+            for i in range(self.topic_number):
+                h[i]=self.D*polygamma(2,self.alpha[i])
+                numerator+=gradient[i]/h[i]
+                denominator+=1/h[i]
+            denominator+=-1/(polygamma(2,np.sum(self.alpha)))
+            c=numerator/denominator
+            
+            #update for alpha
+            for i in range(self.topic_number):
+                self.alpha[i]-=(gradient[i]-c)/h[i]
+                
+            
+    def find_beta(self):
+        for i in range(self.topic_number):
+            for j in range(self.V):
+                num=0
+                for d in range(self.D):
+                    phi=self.phi[d]
+                    document=self.dataset[d]
+                    for n in range(self.N[d]):
+                        word=find_word(document,n)
+                        if word==j:
+                            num=num+phi[n][i]
+                self.beta[i][j]=num
+            norm = np.linalg.norm(self.beta[i])
+            self.beta[i]/=norm
+    def find_lowerbound(self):
+        l=0
+        for d in range(self.D):
+            l+=log(gamma(np.sum(self.alpha)))-np.sum(np.log(gamma(self.alpha)))+np.sum(np.multiply([x-1 for x in self.alpha],[digamma(x)-digamma(np.sum(self.gamma[d])) for x in self.gamma[d]]))
+            for n in range(self.N[d]):
+                word=find_word(self.dataset[d],n)
+                for i in range(self.topic_number):
+                    for j in range(self.V):
+                        if j!=word:
+                            continue
+                        l+=self.phi[d][n][i]*log(self.beta[i][j])
+        return l
+    def fit(self,Corpus1,max_iter=50,tol=0.01):
+        self._init(Corpus1)
+        alpha_history=[self.alpha]
+        beta_history=[self.beta]
+        self.refresh_gp()
+        lowerbound_history=[self.find_lowerbound()]
+        for iterations in range(max_iter):
+            self.find_alpha()
+            alpha_history.append(self.alpha)
+            self.find_beta()
+            beta_history.append(self.beta)
+            lowerbound_history.append(self.find_lowerbound())
+            if abs(lowerbound_history[-2]-lowerbound_history[-1])<=tol:
+                break
+            self.refresh_gp()
+            #print('%d iteration:\n'%iterations)
+            #print(self.alpha)
+            #print('\n')
+            #print(self.beta)
+            #print('\n')
+            
+            
+            #print(theta)
+        theta=find_theta(self.gamma,self.D,self.topic_number)   
+        return theta
+        
+import pandas as pd
+import re
+import nltk
+nltk.download('punkt')
+from nltk.corpus import stopwords
+nltk.download('stopwords')
+from nltk.tokenize import word_tokenize
+from stop_words import get_stop_words
+from nltk.stem.porter import PorterStemmer
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+doc_a = "Brocolli is good to eat. My brother likes to eat good brocolli, but not my mother."
+doc_b = "My mother spends a lot of time driving my brother around to baseball practice."
+doc_c = "Some health experts suggest that driving may cause increased tension and blood pressure."
+doc_d = "I often feel pressure to perform well at school, but my mother never seems to drive my brother to do better."
+doc_e = "Health professionals say that brocolli is good for your health."
+doc_set = [doc_a, doc_b, doc_c, doc_d, doc_e]
+
+stopwordlist=stopwords.words()
+stemmer=PorterStemmer()
+corpus=[]
+for i in doc_set:
+    
+    doc=i.lower()
+    tokens=word_tokenize(doc)
+    stopped_tokens=[j for j in tokens if not j in stopwordlist]
+    final_tokens=[stemmer.stem(j) for j in stopped_tokens]
+    corpus.append(i)
+cntVector=CountVectorizer(stop_words=stopwordlist)
+words_frequency=cntVector.fit_transform(corpus)
+a=lda(4,20,20)
+result=a.fit(words_frequency.toarray())
+
+print('My Lda result:\n')
+print(result)
+print('\nThe stadard result:\n')
+lda2=LatentDirichletAllocation(n_components=4,learning_offset=50.,random_state=0)
+print(lda2.fit_transform(words_frequency))    
+        
+        
