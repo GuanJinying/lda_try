@@ -1,3 +1,4 @@
+#lda algorithm
 import numpy as np
 from scipy.special import digamma,polygamma,gamma
 
@@ -15,6 +16,30 @@ def find_word(document,n):
     while sum(document[0:word])<n:
         word=word+1
     return word-1
+def find_lowerbound(gamma1,phi,alpha,beta,document,N,K,V):
+    gammasum=np.sum(gamma1)
+    gamma_array=[x-digamma(gammasum) for x in digamma(gamma1)]
+    l=0
+    l+=log(gamma(np.sum(alpha)))
+    l-=np.sum(np.log(gamma(alpha)))
+    l+=np.sum(np.multiply([x-1 for x in alpha],gamma_array))
+        
+    for n in range(N):
+        l+=np.sum(np.multiply(phi[n],gamma_array))
+        
+    for n in range(N):
+        word=find_word(document,n)
+        for i in range(K):
+            for j in range(V):
+                if word!=j:
+                    continue
+                else:
+                    l+=phi[n][i]*log(beta[i][j])
+    l-=log(gamma(gammasum))
+    l+=np.sum(np.log(gamma(gamma1)))
+    l-=np.sum(np.multiply([x-1 for x in gamma1],gamma_array))
+    l-=np.sum(np.multiply(phi,np.log(phi)))
+    return l
 class gp:
     """
     According to the paper, it uses varaitional inference instead of sampling.
@@ -49,39 +74,16 @@ class gp:
         for i in range(self.K):
             gamma[i]=self.alpha[i]+self.N/self.K
         self.gamma=gamma
-    def get_lowerbound(self):
-        gammasum=np.sum(self.gamma)
-        gamma_array=[x-digamma(gammasum) for x in digamma(self.gamma)]
-        l=0
-        l+=log(gamma(np.sum(self.alpha)))
-        l+=-np.sum(np.log(gamma(self.alpha)))
-        l+=np.sum(np.multiply([x-1 for x in self.alpha],gamma_array))
-        
-        for n in range(self.N):
-            l+=np.sum(np.multiply(self.phi[n],gamma_array))
-        
-        for n in range(self.N):
-            for i in range(self.K):
-                for j in range(self.V):
-                    if find_word(self.document,n)!=j:
-                        continue
-                    else:
-                        l+=self.phi[n][i]*log(self.beta[i][j])
-        l-=log(gamma(gammasum))
-        l+=np.sum(np.log(gamma(self.gamma)))
-        l-=np.sum(np.multiply([x-1 for x in self.gamma],gamma_array))
-        l-=np.sum(np.multiply(self.phi,np.log(self.phi)))
-        return l
     def find_gp(self,max_iter=50,tol=0.01):
         self._init()
         gamma_history=[self.gamma]
         phi_history=[self.phi]
-        lowerbound_history=[self.get_lowerbound()]
+        lowerbound_history=[find_lowerbound(self.gamma,self.phi,self.alpha,self.beta,self.document,self.N,self.K,self.V)]
         for iteration in range(max_iter):
             self.phi_gamma()
             phi_history.append(self.phi)
             gamma_history.append(self.gamma)
-            lowerbound_history.append(self.get_lowerbound())
+            lowerbound_history.append(find_lowerbound(self.gamma,self.phi,self.alpha,self.beta,self.document,self.N,self.K,self.V))
             #if iteration%5==0:
                 #print(iteration,self.phi)
             if np.abs(lowerbound_history[-2]-lowerbound_history[-1])<=tol:
@@ -94,8 +96,8 @@ class gp:
     def find_phi(self):
         for n in range(self.N):
             v=find_word(self.document,n)
-            for k in range(self.K):
-                self.phi[n][k]=self.beta[k][v]*exp(digamma(self.gamma[k]))
+            for i in range(self.K):
+                self.phi[n][i]=self.beta[i][v]*exp(digamma(self.gamma[i])-digamma(np.sum(self.gamma)))
             norm = np.linalg.norm(self.phi[n])
             self.phi[n]/=norm
     def find_gamma(self):      
@@ -107,10 +109,8 @@ class lda():
     '''
     Find alpha and beta using gp defined above
     '''
-    def __init__(self,topic_number,iteration1,iteration2):
+    def __init__(self,topic_number):
         self.topic_number=topic_number
-        self.iteration1=iteration1
-        self.iteration2=iteration2
     def _init(self,Corpus):
         X=np.matrix(Corpus)
         D,V=X.shape
@@ -125,20 +125,23 @@ class lda():
         self.alpha=np.empty(self.topic_number,dtype=float)
         np.random.seed(0)
         self.alpha=np.random.uniform(0.1,2.0,self.topic_number)
-        self.random.seed(1)
+        np.random.seed(1)
         self.beta=np.random.rand(self.topic_number,V)
         for i in range(self.topic_number):
             norm = np.linalg.norm(self.beta[i])
             self.beta[i]/=norm
+    
+        
     def refresh_gp(self):
+        self.phi=[]
         for d in range(self.D):
             document=self.dataset[d]
             dgp=gp(self.alpha,self.beta,document,self.topic_number,self.N[d])
             dgp.find_gp()
             self.phi.append(dgp.phi)
             self.gamma[d]=dgp.gamma
-    def find_alpha(self):
-        for iterations in range(self.iteration1):
+    def find_alpha(self,max_iter=50):
+        for iterations in range(max_iter):
             gradient=np.empty(self.topic_number,dtype=float)
             for i in range(self.topic_number):
                 gradient[i]=self.D*(digamma(np.sum(self.alpha))-digamma(self.alpha[i]))
@@ -151,7 +154,7 @@ class lda():
                 h[i]=self.D*polygamma(2,self.alpha[i])
                 numerator+=gradient[i]/h[i]
                 denominator+=1/h[i]
-            denominator+=-1/(polygamma(2,np.sum(self.alpha)))
+            denominator-=1/(polygamma(2,np.sum(self.alpha)))
             c=numerator/denominator
             
             #update for alpha
@@ -173,44 +176,41 @@ class lda():
                 self.beta[i][j]=num
             norm = np.linalg.norm(self.beta[i])
             self.beta[i]/=norm
-    def find_lowerbound(self):
-        l=0
+    def find_corpusbound(self):
+        bound=0
         for d in range(self.D):
-            l+=log(gamma(np.sum(self.alpha)))-np.sum(np.log(gamma(self.alpha)))+np.sum(np.multiply([x-1 for x in self.alpha],[digamma(x)-digamma(np.sum(self.gamma[d])) for x in self.gamma[d]]))
-            for n in range(self.N[d]):
-                word=find_word(self.dataset[d],n)
-                for i in range(self.topic_number):
-                    for j in range(self.V):
-                        if j!=word:
-                            continue
-                        l+=self.phi[d][n][i]*log(self.beta[i][j])
-        return l
+            bound+=find_lowerbound(self.gamma[d],self.phi[d],self.alpha,self.beta,self.dataset[d],self.N[d],self.topic_number,self.V)
+        return bound
     def fit(self,Corpus1,max_iter=50,tol=0.01):
+        np.seterr(divide = 'ignore') 
         self._init(Corpus1)
         alpha_history=[self.alpha]
         beta_history=[self.beta]
         self.refresh_gp()
-        lowerbound_history=[self.find_lowerbound()]
+        lowerbound_history=[self.find_corpusbound()]
         for iterations in range(max_iter):
             self.find_alpha()
             alpha_history.append(self.alpha)
             self.find_beta()
             beta_history.append(self.beta)
-            lowerbound_history.append(self.find_lowerbound())
+            print('%d iteration:\nalpha:\n'%iterations)
+            print(self.alpha)
+            print('\nbeta\n')
+            print(self.beta)
+            print('\nphi\n')
+            print(self.phi)
+            print('\ngamma\n')
+            print(self.gamma)
+            bound=self.find_corpusbound()
+            print(bound)
+            lowerbound_history.append(bound)
             if abs(lowerbound_history[-2]-lowerbound_history[-1])<=tol:
                 break
             self.refresh_gp()
-            #print('%d iteration:\n'%iterations)
-            #print(self.alpha)
-            #print('\n')
-            #print(self.beta)
-            #print('\n')
-            
-            
-            #print(theta)
+           
         theta=find_theta(self.gamma,self.D,self.topic_number)   
         return theta
-        
+#for testing 
 import pandas as pd
 import re
 import nltk
@@ -241,7 +241,7 @@ for i in doc_set:
     corpus.append(i)
 cntVector=CountVectorizer(stop_words=stopwordlist)
 words_frequency=cntVector.fit_transform(corpus)
-a=lda(4,20,20)
+a=lda(4)
 result=a.fit(words_frequency.toarray())
 
 print('My Lda result:\n')
