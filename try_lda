@@ -4,11 +4,36 @@ from scipy.special import digamma,polygamma,gamma
 
 from math import exp,log
 
-def find_theta(gamma,D,K):
-    theta=np.empty((D,K),dtype=float)
-    for d in range(D):
-        denominator=np.sum(gamma[d])
-        theta[d]=gamma[d]/denominator
+def find_location(word):
+
+    for i in range(word.shape[0]):
+        if word[i]!=0:
+            break
+    return i
+
+def simulation(M=5,K=10,V=30):
+    """Simulation process of the LDA model. 
+    """
+    
+    corpus=np.empty((M,V),dtype=int) 
+    alpha = np.random.gamma(shape=2,size=K)
+    beta=np.random.dirichlet(np.ones(V),K)
+    N=[x+1 for x in np.random.poisson(lam=40,size = M)]
+    theta=np.random.dirichlet(alpha,M)
+    for d in range(M):
+        z=np.random.multinomial(1,theta[d],N[d])
+        w=np.zeros(V,dtype=int)
+        for n in range(N[d]):
+            topic=find_location(z[n])
+            word=np.random.multinomial(1,beta[topic])
+            location=find_location(word)
+            w[location]+=1
+        corpus[d]=w
+    return corpus,alpha,beta
+            
+def find_theta(alpha):
+    norm=np.sum(alpha)
+    theta=alpha/norm
     return theta
 
 def find_word(document,n):
@@ -56,13 +81,14 @@ class gp:
     z[n] is a 1*k vector following the multinomial distribution parametrized by phi
     
     """
-    def __init__(self,alpha,beta,document,K,N):
+    def __init__(self,alpha,beta,document,K,N,tol=1e-3):
         self.alpha=alpha
         self.beta=beta
         self.document=document
         self.K=K
         self.N=N
         self.V=document.shape[0]
+        self.tol=tol
     def _init(self):
         phi=np.empty((self.N,self.K),dtype=float)
         gamma=np.empty(self.K,dtype=float)
@@ -73,7 +99,7 @@ class gp:
         for i in range(self.K):
             gamma[i]=self.alpha[i]+self.N/self.K
         self.gamma=gamma
-    def find_gp(self,tol=0.01):
+    def find_gp(self):
         max_iter=2*self.N
         self._init()
         #lowerbound_history=[find_lowerbound(self.gamma,self.phi,self.alpha,self.beta,self.document,self.N,self.K,self.V)]
@@ -89,7 +115,7 @@ class gp:
                 #print('gp converged with ll %.3f at iteration %d'%(self.lowerbound_history[-1],
                 #                                                     iteration))
             #    break
-            if np.linalg.norm(phi_history-self.phi)<=tol and np.linalg.norm(gamma_history-self.gamma)<=tol:
+            if np.linalg.norm(phi_history-self.phi)<=self.tol and np.linalg.norm(gamma_history-self.gamma)<=self.tol:
                 break
     def phi_gamma(self):
         self.find_phi()
@@ -120,8 +146,10 @@ class lda():
     '''
     Find alpha and beta using gp defined above
     '''
-    def __init__(self,topic_number):
+    def __init__(self,topic_number,tol=0.001,max_iter=200):
         self.topic_number=topic_number
+        self.tol=tol
+        self.max_iter=max_iter
     def _init(self,Corpus):
         X=np.matrix(Corpus)
         D,V=X.shape
@@ -199,13 +227,13 @@ class lda():
         for d in range(self.D):
             bound+=find_lowerbound(self.gamma[d],self.phi[d],self.alpha,self.beta,self.dataset[d],self.N[d],self.topic_number,self.V)
         return bound
-    def fit(self,Corpus1,max_iter=50,tol=0.01):
+    def fit(self,Corpus1):
         #np.seterr(divide = 'ignore') 
         self._init(Corpus1)
         alpha_history=np.empty(self.topic_number,dtype=float)
         self.refresh_gp()
         lowerbound_history=[self.find_corpusbound()]
-        for iterations in range(max_iter):
+        for iterations in range(self.max_iter):
             alpha_history=self.find_alpha()
             beta_history=self.find_beta_history()
             self.find_beta()
@@ -214,51 +242,36 @@ class lda():
             #lowerbound_history.append(bound)
             #if abs(lowerbound_history[-2]-lowerbound_history[-1])<=tol:
             #    break
-            if np.linalg.norm(alpha_history-self.alpha)<=tol and np.linalg.norm(beta_history-self.beta)<=tol:
+            if np.linalg.norm(alpha_history-self.alpha)<=self.tol and np.linalg.norm(beta_history-self.beta)<=self.tol:
                 break
             self.refresh_gp()
            
-        theta=find_theta(self.gamma,self.D,self.topic_number)   
-        return theta
-#for testing 
-import pandas as pd
-import re
-import nltk
-nltk.download('punkt')
-from nltk.corpus import stopwords
-nltk.download('stopwords')
-from nltk.tokenize import word_tokenize
-from stop_words import get_stop_words
-from nltk.stem.porter import PorterStemmer
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.decomposition import LatentDirichletAllocation
-doc_a = "Brocolli is good to eat. My brother likes to eat good brocolli, but not my mother."
-doc_b = "My mother spends a lot of time driving my brother around to baseball practice."
-doc_c = "Some health experts suggest that driving may cause increased tension and blood pressure."
-doc_d = "I often feel pressure to perform well at school, but my mother never seems to drive my brother to do better."
-doc_e = "Health professionals say that brocolli is good for your health."
-doc_set = [doc_a, doc_b, doc_c, doc_d, doc_e]
-
-stopwordlist=stopwords.words()
-stemmer=PorterStemmer()
-corpus=[]
-for i in doc_set:
+        theta=find_theta(self.alpha)   
+        return self.alpha,self.beta
     
-    doc=i.lower()
-    tokens=word_tokenize(doc)
-    stopped_tokens=[j for j in tokens if not j in stopwordlist]
-    final_tokens=[stemmer.stem(j) for j in stopped_tokens]
-    corpus.append(i)
-cntVector=CountVectorizer(stop_words=stopwordlist)
-words_frequency=cntVector.fit_transform(corpus)
-a=lda(5)
-result=a.fit(words_frequency.toarray())
+def calculate_mse(alpha,beta,alpha_est,beta_est):
+    alpha=alpha/np.sum(alpha)
+    alpha_est=alpha_est/np.sum(alpha_est)
+    alpha_mse=np.mean((alpha-alpha_est)**2)
+    beta_mse=np.mean((beta-beta_est)**2)
+    return alpha_mse,beta_mse
+#for testing 
+words_frequency,alpha,beta=simulation(K=5)
+print(words_frequency)
 
-print('My Lda result:\n')
-print(result)
-print('\nThe stadard result:\n')
-lda2=LatentDirichletAllocation(n_components=5,learning_offset=50.,random_state=0)
-print(lda2.fit_transform(words_frequency))
+a=lda(5,tol=0.01)
+alpha1,beta1=a.fit(words_frequency)
 
-        
-        
+print('My Lda result:\nalpha:\n')
+print(alpha1)
+print('\nbeta:\n')
+print(beta1)
+print('\nThe stadard result:\nalpha:\n')
+print(alpha)
+print('\nbeta:\n')
+print(beta)
+alpha_mse,beta_mse=calculate_mse(alpha,beta,alpha1,beta1)
+print('alpha_mse:\n')
+print(alpha_mse)
+print('\nbeta_mse:\n')
+print(beta_mse)
